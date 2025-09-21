@@ -1,5 +1,5 @@
 import { spawn } from 'child_process';
-import { VideoInfo } from '../types/video-forensics.types.js';
+import { VideoInfo } from '../types/video-forensics.types';
 
 export class MediaAnalysisService {
   async getVideoInfo(videoPath: string): Promise<VideoInfo> {

@@ -1,4 +1,5 @@
-import { McpClient } from './mcp-client.js';
+import { McpClientManager } from '../client/McpClientManager';
+import { CryptoUtils } from '../utils/crypto.utils';
 
 export interface InvestigationRequest {
   type: 'fact_check' | 'media_analysis' | 'full_investigation';
@@ -6,32 +7,12 @@ export interface InvestigationRequest {
     claim?: string;
     media_url?: string;
     context?: string;
-    source_url?: string;
   };
-  options?: {
-    include_forensics?: boolean;
-    generate_lesson?: boolean;
-    create_timeline?: boolean;
+  options: {
+    include_forensics: boolean;
+    generate_lesson: boolean;
+    create_timeline: boolean;
   };
-}
-
-export interface InvestigationResult {
-  id: string;
-  verdict: 'TRUE' | 'FALSE' | 'MIXED' | 'UNVERIFIED';
-  confidence: number;
-  explanation: string;
-  evidence_chain: EvidenceItem[];
-  forensic_analysis?: any;
-  timeline?: TimelineEvent[];
-  techniques_detected: string[];
-  counterfactuals?: CounterfactualNarrative[];
-  signed_artifact: {
-    id: string;
-    sha256: string;
-    signature: string;
-    exportable_json_ld?: any;
-  };
-  micro_lesson?: MicroLesson;
 }
 
 export interface EvidenceItem {
@@ -53,253 +34,177 @@ export interface TimelineEvent {
   media_snapshot?: string;
 }
 
-export interface CounterfactualNarrative {
-  narrative: string;
-  plausibility_score: number;
-  evidence_gaps: string[];
-  citations: string[];
-}
-
-export interface MicroLesson {
-  technique: string;
+export interface InvestigationResult {
+  id: string;
+  verdict: 'TRUE' | 'FALSE' | 'MIXED' | 'UNVERIFIED';
+  confidence: number;
   explanation: string;
-  interactive_elements: Array<{
-    type: 'question' | 'visual_comparison' | 'audio_sample';
-    content: string;
-    correct_answer?: string;
-  }>;
-  duration_seconds: number;
+  evidence_chain: EvidenceItem[];
+  forensic_analysis?: any;
+  timeline?: TimelineEvent[];
+  techniques_detected: string[];
+  counterfactuals?: any[];
+  signed_artifact: {
+    id: string;
+    sha256: string;
+    signature: string;
+    exportable_json_ld?: any;
+  };
+  micro_lesson?: any;
+  processing_time_ms?: number;
 }
 
 export class InvestigationOrchestrator {
-  private clients: Map<string, McpClient> = new Map();
-  private investigationHistory: Map<string, InvestigationResult> = new Map();
+  private investigations: Map<string, InvestigationResult> = new Map();
+  private clientManager: McpClientManager;
 
-  constructor(serverConfigs: Array<{ name: string; command: string; args: string[]; env?: Record<string, string> }>) {
-    this.initializeClients(serverConfigs);
-  }
-
-  private async initializeClients(configs: Array<{ name: string; command: string; args: string[]; env?: Record<string, string> }>): Promise<void> {
-    for (const config of configs) {
-      try {
-        const client = new McpClient(config.name);
-        await client.connect(config.command, config.args, config.env);
-        this.clients.set(config.name, client);
-        console.log(`Connected to ${config.name} MCP server`);
-      } catch (error) {
-        console.error(`Failed to connect to ${config.name}:`, error);
-      }
-    }
+  constructor(clientManager: McpClientManager) {
+    this.clientManager = clientManager;
   }
 
   async investigate(request: InvestigationRequest): Promise<InvestigationResult> {
-    const investigationId = this.generateInvestigationId();
-    console.log(`Starting investigation ${investigationId} for type: ${request.type}`);
+    const investigationId = CryptoUtils.generateId();
+    const startTime = Date.now();
 
-    try {
-      switch (request.type) {
-        case 'fact_check':
-          return await this.performFactCheck(investigationId, request);
-        case 'media_analysis':
-          return await this.performMediaAnalysis(investigationId, request);
-        case 'full_investigation':
-          return await this.performFullInvestigation(investigationId, request);
-        default:
-          throw new Error(`Unknown investigation type: ${request.type}`);
-      }
-    } catch (error) {
-      console.error(`Investigation ${investigationId} failed:`, error);
-      throw error;
-    }
-  }
-
-  private async performFactCheck(id: string, request: InvestigationRequest): Promise<InvestigationResult> {
-    const { claim, context } = request.content;
-    
-    if (!claim) {
-      throw new Error('Claim is required for fact-checking');
-    }
-
-    // Step 1: Scout Agent - Initial fact check
-    const factCheckClient = this.clients.get('factcheck');
-    if (!factCheckClient) {
-      throw new Error('FactCheck MCP server not available');
-    }
-
-    console.log(`[${id}] Running initial fact check...`);
-    const factCheckResult = await factCheckClient.callTool('check_claim', {
-      claim,
-      context,
+    console.log(`Starting investigation ${investigationId}:`, {
+      type: request.type,
+      has_claim: !!request.content.claim,
+      has_media: !!request.content.media_url,
     });
 
-    const evidence: EvidenceItem[] = [];
-    
-    // Add fact-check evidence
-    if (factCheckResult.evidence) {
-      factCheckResult.evidence.forEach((item: any) => {
-        evidence.push({
-          id: item.id || this.generateId(),
-          type: 'fact_check',
-          source: item.source,
-          content: item.content,
-          confidence: item.confidence,
-          timestamp: item.timestamp,
-          metadata: item,
-        });
-      });
-    }
+    try {
+      // Initialize evidence chain
+      const evidenceChain: EvidenceItem[] = [];
+      let forensicAnalysis: any = null;
+      let timeline: TimelineEvent[] = [];
 
-    // Step 2: Search Agent - Find additional evidence
-    const webSearchClient = this.clients.get('web-search');
-    if (webSearchClient) {
-      console.log(`[${id}] Searching for additional evidence...`);
-      try {
-        const searchResult = await webSearchClient.callTool('search', {
-          query: claim,
-          include_archives: true,
-        });
-        
-        if (searchResult.results) {
-          searchResult.results.slice(0, 5).forEach((result: any) => {
-            evidence.push({
-              id: this.generateId(),
-              type: 'web_search',
-              source: result.url || result.source,
-              content: result.snippet || result.content,
-              confidence: result.relevance_score || 0.7,
-              timestamp: new Date().toISOString(),
-              metadata: result,
-            });
-          });
-        }
-      } catch (error) {
-        console.warn(`[${id}] Web search failed:`, error);
+      // Step 1: Fact-checking (if claim provided)
+      if (request.content.claim) {
+        const factCheckEvidence = await this.performFactCheck(request.content.claim, request.content.context);
+        evidenceChain.push(...factCheckEvidence);
       }
+
+      // Step 2: Media analysis (if media provided and requested)
+      if (request.content.media_url && (request.type === 'media_analysis' || request.type === 'full_investigation')) {
+        if (request.options.include_forensics) {
+          forensicAnalysis = await this.performMediaForensics(request.content.media_url);
+          
+          // Add forensic evidence to chain
+          if (forensicAnalysis) {
+            evidenceChain.push({
+              id: CryptoUtils.generateId(),
+              type: 'forensic',
+              source: 'video_forensics_analysis',
+              content: `Media forensic analysis completed. Tampering probability: ${Math.round((forensicAnalysis.tampering_probability || 0) * 100)}%`,
+              confidence: 1 - (forensicAnalysis.tampering_probability || 0),
+              timestamp: new Date().toISOString(),
+              metadata: {
+                techniques_detected: forensicAnalysis.techniques_detected || [],
+                suspicious_frames: forensicAnalysis.suspicious_frames?.length || 0,
+              },
+            });
+          }
+        }
+
+        // Web search for similar media
+        const reverseSearchEvidence = await this.performReverseImageSearch(request.content.media_url);
+        evidenceChain.push(...reverseSearchEvidence);
+      }
+
+      // Step 3: Web evidence gathering
+      if (request.content.claim) {
+        const webEvidence = await this.gatherWebEvidence(request.content.claim);
+        evidenceChain.push(...webEvidence);
+      }
+
+      // Step 4: Generate timeline if requested
+      if (request.options.create_timeline) {
+        timeline = await this.generateTimeline(evidenceChain, forensicAnalysis);
+      }
+
+      // Step 5: Synthesize verdict
+      const { verdict, confidence, explanation } = this.synthesizeVerdict(
+        evidenceChain,
+        forensicAnalysis,
+        request.content.claim
+      );
+
+      // Step 6: Detect techniques
+      const techniquesDetected = this.detectTechniques(evidenceChain, forensicAnalysis);
+
+      // Step 7: Generate micro-lesson if requested
+      let microLesson: any = null;
+      if (request.options.generate_lesson) {
+        microLesson = this.generateMicroLesson(techniquesDetected, verdict);
+      }
+
+      // Create signed artifact
+      const artifactData = {
+        id: investigationId,
+        verdict,
+        confidence,
+        evidence_chain: evidenceChain,
+        timestamp: new Date().toISOString(),
+        request: request,
+      };
+
+      const artifactJson = JSON.stringify(artifactData);
+      const sha256 = CryptoUtils.computeSha256(artifactJson);
+      const signature = CryptoUtils.signArtifact(artifactJson);
+
+      const result: InvestigationResult = {
+        id: investigationId,
+        verdict,
+        confidence,
+        explanation,
+        evidence_chain: evidenceChain,
+        forensic_analysis: forensicAnalysis,
+        timeline: timeline.length > 0 ? timeline : undefined,
+        techniques_detected: techniquesDetected,
+        signed_artifact: {
+          id: investigationId,
+          sha256,
+          signature,
+          exportable_json_ld: this.generateJsonLD(artifactData),
+        },
+        micro_lesson: microLesson,
+        processing_time_ms: Date.now() - startTime,
+      };
+
+      // Store result
+      this.investigations.set(investigationId, result);
+
+      console.log(`Investigation ${investigationId} completed:`, {
+        verdict,
+        confidence,
+        evidence_count: evidenceChain.length,
+        processing_time: result.processing_time_ms,
+      });
+
+      return result;
+
+    } catch (error) {
+      console.error(`Investigation ${investigationId} failed:`, error);
+      throw new Error(`Investigation failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
-
-    // Step 3: Generate timeline
-    const timeline = await this.generateTimeline(evidence);
-
-    // Step 4: Generate counterfactuals
-    const counterfactuals = await this.generateCounterfactuals(claim, evidence);
-
-    // Step 5: Create micro-lesson
-    const microLesson = request.options?.generate_lesson ? 
-      await this.createMicroLesson(factCheckResult.techniques_detected?.[0] || 'misinformation_detection') : 
-      undefined;
-
-    // Step 6: Create exportable artifact
-    const exportableJsonLd = await this.generateClaimReviewJsonLd(claim, factCheckResult, evidence);
-
-    const result: InvestigationResult = {
-      id,
-      verdict: factCheckResult.verdict || 'UNVERIFIED',
-      confidence: factCheckResult.confidence || 0.5,
-      explanation: factCheckResult.explanation || 'Analysis completed',
-      evidence_chain: evidence,
-      timeline,
-      techniques_detected: factCheckResult.techniques_detected || [],
-      counterfactuals,
-      signed_artifact: {
-        ...factCheckResult.signedArtifact,
-        exportable_json_ld: exportableJsonLd,
-      },
-      micro_lesson: microLesson,
-    };
-
-    this.investigationHistory.set(id, result);
-    return result;
   }
 
-  private async performMediaAnalysis(id: string, request: InvestigationRequest): Promise<InvestigationResult> {
-    const { media_url, claim, context } = request.content;
-    
-    if (!media_url) {
-      throw new Error('Media URL is required for media analysis');
-    }
-
+  private async performFactCheck(claim: string, context?: string): Promise<EvidenceItem[]> {
     const evidence: EvidenceItem[] = [];
-    let forensicAnalysis: any = null;
 
-    // Step 1: Forensic Agent - Analyze media
-    const forensicsClient = this.clients.get('video-forensics');
-    if (forensicsClient) {
-      console.log(`[${id}] Running forensic analysis...`);
-      
-      try {
-        if (this.isVideoUrl(media_url)) {
-          const result = await forensicsClient.callTool('analyze_video', {
-            video_url: media_url,
-            analysis_type: 'full',
-          });
-          forensicAnalysis = result[0];
-        } else if (this.isImageUrl(media_url)) {
-          const result = await forensicsClient.callTool('analyze_image', {
-            image_url: media_url,
-            analysis_methods: ['ela', 'noise', 'metadata', 'reverse_search'],
-          });
-          forensicAnalysis = result[0];
-        }
-
-        if (forensicAnalysis) {
-          evidence.push({
-            id: this.generateId(),
-            type: 'forensic',
-            source: 'forensic_analysis',
-            content: `Forensic analysis completed. Tampering probability: ${forensicAnalysis.tampering_probability || forensicAnalysis.manipulationProbability}`,
-            confidence: 1 - (forensicAnalysis.tampering_probability || forensicAnalysis.manipulationProbability || 0),
-            timestamp: new Date().toISOString(),
-            metadata: forensicAnalysis,
-          });
-        }
-      } catch (error) {
-        console.warn(`[${id}] Forensic analysis failed:`, error);
-      }
-    }
-
-    // Step 2: Reverse search for media
-    const reverseSearchClient = this.clients.get('reverse-search');
-    if (reverseSearchClient) {
-      console.log(`[${id}] Running reverse image search...`);
-      try {
-        const searchResult = await reverseSearchClient.callTool('reverse_search', {
-          media_url,
-        });
-        
-        if (searchResult.matches) {
-          searchResult.matches.slice(0, 5).forEach((match: any) => {
-            evidence.push({
-              id: this.generateId(),
-              type: 'reverse_image',
-              source: match.source_url,
-              content: `Similar image found: ${match.description || 'No description'}`,
-              confidence: match.similarity_score || 0.7,
-              timestamp: match.first_seen || new Date().toISOString(),
-              metadata: match,
-            });
-          });
-        }
-      } catch (error) {
-        console.warn(`[${id}] Reverse search failed:`, error);
-      }
-    }
-
-    // Step 3: If claim provided, also fact-check it
-    let factCheckResult: any = null;
-    if (claim) {
-      const factCheckClient = this.clients.get('factcheck');
-      if (factCheckClient) {
-        console.log(`[${id}] Fact-checking associated claim...`);
-        factCheckResult = await factCheckClient.callTool('check_claim', {
+    try {
+      // Call fact-check MCP server
+      const factCheckClient = this.clientManager.getClient('factcheck');
+      if (factCheckClient?.connected) {
+        const result = await this.clientManager.callTool('factcheck', 'check_claim', {
           claim,
-          media_url,
           context,
         });
 
-        if (factCheckResult.evidence) {
-          factCheckResult.evidence.forEach((item: any) => {
+        if (result && result.evidence) {
+          result.evidence.forEach((item: any) => {
             evidence.push({
-              id: item.id || this.generateId(),
+              id: item.id,
               type: 'fact_check',
               source: item.source,
               content: item.content,
@@ -309,533 +214,375 @@ export class InvestigationOrchestrator {
             });
           });
         }
+
+        // Also search existing fact-checks
+        const searchResults = await this.clientManager.callTool('factcheck', 'search_factchecks', {
+          query: claim,
+        });
+
+        if (searchResults && Array.isArray(searchResults)) {
+          searchResults.forEach((item: any, index: number) => {
+            if (item.claimReview && item.claimReview[0]) {
+              const review = item.claimReview[0];
+              evidence.push({
+                id: CryptoUtils.generateId(),
+                type: 'fact_check',
+                source: review.publisher?.name || 'External Fact Checker',
+                content: `Previous fact-check: ${review.textualRating} - ${review.url}`,
+                confidence: 0.9,
+                timestamp: review.reviewDate || new Date().toISOString(),
+                metadata: item,
+              });
+            }
+          });
+        }
       }
-    }
-
-    // Determine overall verdict based on forensic and fact-check results
-    const verdict = this.synthesizeVerdict(forensicAnalysis, factCheckResult);
-    const confidence = this.calculateOverallConfidence(evidence, forensicAnalysis);
-
-    const timeline = await this.generateTimeline(evidence);
-    const techniques = this.extractTechniques(forensicAnalysis, factCheckResult);
-    const counterfactuals = claim ? await this.generateCounterfactuals(claim, evidence) : [];
-
-    const microLesson = request.options?.generate_lesson ? 
-      await this.createMicroLesson(techniques[0] || 'media_manipulation_detection') : 
-      undefined;
-
-    // Create signed artifact
-    const artifactData = JSON.stringify({
-      media_url,
-      claim,
-      forensicAnalysis,
-      factCheckResult,
-      evidence,
-      timestamp: new Date().toISOString(),
-    });
-
-    const signedArtifact = {
-      id: this.generateId(),
-      sha256: this.computeSha256(artifactData),
-      signature: this.signArtifact(artifactData),
-      exportable_json_ld: claim ? await this.generateClaimReviewJsonLd(claim, { verdict, confidence }, evidence) : null,
-    };
-
-    const result: InvestigationResult = {
-      id,
-      verdict,
-      confidence,
-      explanation: this.generateExplanation(verdict, evidence, forensicAnalysis),
-      evidence_chain: evidence,
-      forensic_analysis: forensicAnalysis,
-      timeline,
-      techniques_detected: techniques,
-      counterfactuals,
-      signed_artifact: signedArtifact,
-      micro_lesson: microLesson,
-    };
-
-    this.investigationHistory.set(id, result);
-    return result;
-  }
-
-  private async performFullInvestigation(id: string, request: InvestigationRequest): Promise<InvestigationResult> {
-    console.log(`[${id}] Starting full investigation...`);
-    
-    // Full investigation combines both fact-checking and media analysis
-    const { claim, media_url } = request.content;
-    
-    if (!claim && !media_url) {
-      throw new Error('Either claim or media_url is required for full investigation');
-    }
-
-    // Start with media analysis if media is present
-    let mediaResult: InvestigationResult | null = null;
-    if (media_url) {
-      mediaResult = await this.performMediaAnalysis(`${id}-media`, {
-        type: 'media_analysis',
-        content: { media_url, claim, context: request.content.context },
-        options: { generate_lesson: false }, // We'll generate lesson at the end
-      });
-    }
-
-    // Then perform fact check if claim is present
-    let factCheckResult: InvestigationResult | null = null;
-    if (claim) {
-      factCheckResult = await this.performFactCheck(`${id}-fact`, {
+    } catch (error) {
+      console.error('Fact-check failed:', error);
+      // Add fallback evidence
+      evidence.push({
+        id: CryptoUtils.generateId(),
         type: 'fact_check',
-        content: { claim, media_url, context: request.content.context },
-        options: { generate_lesson: false },
+        source: 'system',
+        content: `Unable to complete fact-check: ${error instanceof Error ? error.message : 'Service unavailable'}`,
+        confidence: 0.1,
+        timestamp: new Date().toISOString(),
+        metadata: { error: true },
       });
     }
 
-    // Merge results
-    const combinedEvidence: EvidenceItem[] = [
-      ...(mediaResult?.evidence_chain || []),
-      ...(factCheckResult?.evidence_chain || []),
-    ];
-
-    // Remove duplicates based on content hash
-    const uniqueEvidence = this.deduplicateEvidence(combinedEvidence);
-
-    // Synthesize final verdict
-    const verdict = this.synthesizeCombinedVerdict(mediaResult, factCheckResult);
-    const confidence = this.calculateCombinedConfidence(mediaResult, factCheckResult, uniqueEvidence);
-
-    const timeline = await this.generateTimeline(uniqueEvidence);
-    const techniques = [
-      ...(mediaResult?.techniques_detected || []),
-      ...(factCheckResult?.techniques_detected || []),
-    ].filter((t, i, arr) => arr.indexOf(t) === i); // Remove duplicates
-
-    const counterfactuals = claim ? await this.generateCounterfactuals(claim, uniqueEvidence) : [];
-
-    const microLesson = request.options?.generate_lesson ? 
-      await this.createMicroLesson(techniques[0] || 'comprehensive_fact_checking') : 
-      undefined;
-
-    // Create comprehensive signed artifact
-    const artifactData = JSON.stringify({
-      claim,
-      media_url,
-      mediaAnalysis: mediaResult?.forensic_analysis,
-      factCheckAnalysis: factCheckResult,
-      evidence: uniqueEvidence,
-      timestamp: new Date().toISOString(),
-    });
-
-    const signedArtifact = {
-      id: this.generateId(),
-      sha256: this.computeSha256(artifactData),
-      signature: this.signArtifact(artifactData),
-      exportable_json_ld: claim ? await this.generateClaimReviewJsonLd(claim, { verdict, confidence }, uniqueEvidence) : null,
-    };
-
-    const result: InvestigationResult = {
-      id,
-      verdict,
-      confidence,
-      explanation: this.generateCombinedExplanation(verdict, uniqueEvidence, mediaResult, factCheckResult),
-      evidence_chain: uniqueEvidence,
-      forensic_analysis: mediaResult?.forensic_analysis,
-      timeline,
-      techniques_detected: techniques,
-      counterfactuals,
-      signed_artifact: signedArtifact,
-      micro_lesson: microLesson,
-    };
-
-    this.investigationHistory.set(id, result);
-    return result;
+    return evidence;
   }
 
-  // Helper methods
-  private generateInvestigationId(): string {
-    return `inv_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-  }
-
-  private generateId(): string {
-    return Math.random().toString(36).substr(2, 9);
-  }
-
-  private isVideoUrl(url: string): boolean {
-    return /\.(mp4|avi|mov|wmv|flv|webm)$/i.test(url) || url.includes('video') || url.includes('reel');
-  }
-
-  private isImageUrl(url: string): boolean {
-    return /\.(jpg|jpeg|png|gif|bmp|webp)$/i.test(url) || url.includes('image');
-  }
-
-  private synthesizeVerdict(forensicResult: any, factCheckResult: any): 'TRUE' | 'FALSE' | 'MIXED' | 'UNVERIFIED' {
-    if (factCheckResult?.verdict) {
-      return factCheckResult.verdict;
-    }
-
-    if (forensicResult) {
-      const tamperingProb = forensicResult.tampering_probability || forensicResult.manipulationProbability || 0;
-      if (tamperingProb > 0.7) return 'FALSE';
-      if (tamperingProb > 0.3) return 'MIXED';
-      return 'UNVERIFIED';
-    }
-
-    return 'UNVERIFIED';
-  }
-
-  private synthesizeCombinedVerdict(
-    mediaResult: InvestigationResult | null,
-    factCheckResult: InvestigationResult | null
-  ): 'TRUE' | 'FALSE' | 'MIXED' | 'UNVERIFIED' {
-    const verdicts = [mediaResult?.verdict, factCheckResult?.verdict].filter(Boolean);
-    
-    if (verdicts.includes('FALSE')) return 'FALSE';
-    if (verdicts.includes('MIXED')) return 'MIXED';
-    if (verdicts.includes('TRUE') && verdicts.length === 1) return 'TRUE';
-    if (verdicts.includes('TRUE') && verdicts.includes('UNVERIFIED')) return 'MIXED';
-    
-    return 'UNVERIFIED';
-  }
-
-  private calculateOverallConfidence(evidence: EvidenceItem[], forensicResult: any): number {
-    if (evidence.length === 0) return 0.5;
-
-    const avgEvidenceConfidence = evidence.reduce((sum, e) => sum + e.confidence, 0) / evidence.length;
-    
-    if (forensicResult) {
-      const forensicConfidence = 1 - (forensicResult.tampering_probability || forensicResult.manipulationProbability || 0.5);
-      return (avgEvidenceConfidence + forensicConfidence) / 2;
-    }
-
-    return avgEvidenceConfidence;
-  }
-
-  private calculateCombinedConfidence(
-    mediaResult: InvestigationResult | null,
-    factCheckResult: InvestigationResult | null,
-    evidence: EvidenceItem[]
-  ): number {
-    const confidences = [
-      mediaResult?.confidence,
-      factCheckResult?.confidence,
-    ].filter((c): c is number => c !== undefined);
-
-    if (confidences.length === 0) {
-      return evidence.length > 0 ? 
-        evidence.reduce((sum, e) => sum + e.confidence, 0) / evidence.length : 
-        0.5;
-    }
-
-    return confidences.reduce((sum, c) => sum + c, 0) / confidences.length;
-  }
-
-  private extractTechniques(forensicResult: any, factCheckResult: any): string[] {
-    const techniques = new Set<string>();
-
-    if (forensicResult?.techniques_detected) {
-      forensicResult.techniques_detected.forEach((t: string) => techniques.add(t));
-    }
-
-    if (factCheckResult?.techniques_detected) {
-      factCheckResult.techniques_detected.forEach((t: string) => techniques.add(t));
-    }
-
-    return Array.from(techniques);
-  }
-
-  private deduplicateEvidence(evidence: EvidenceItem[]): EvidenceItem[] {
-    const seen = new Set<string>();
-    return evidence.filter(item => {
-      const hash = this.computeSha256(item.content + item.source);
-      if (seen.has(hash)) return false;
-      seen.add(hash);
-      return true;
-    });
-  }
-
-  private generateExplanation(
-    verdict: string,
-    evidence: EvidenceItem[],
-    forensicResult?: any
-  ): string {
-    let explanation = `Investigation resulted in verdict: ${verdict}. `;
-    explanation += `Analysis based on ${evidence.length} evidence sources. `;
-
-    if (forensicResult) {
-      const tamperingProb = forensicResult.tampering_probability || forensicResult.manipulationProbability;
-      if (tamperingProb !== undefined) {
-        explanation += `Forensic analysis indicates ${Math.round(tamperingProb * 100)}% probability of tampering. `;
+  private async performMediaForensics(mediaUrl: string): Promise<any> {
+    try {
+      const forensicsClient = this.clientManager.getClient('video-forensics');
+      if (!forensicsClient?.connected) {
+        throw new Error('Video forensics service unavailable');
       }
-    }
 
-    const highConfidenceEvidence = evidence.filter(e => e.confidence > 0.8);
-    if (highConfidenceEvidence.length > 0) {
-      explanation += `${highConfidenceEvidence.length} high-confidence evidence sources support this assessment.`;
-    }
-
-    return explanation;
-  }
-
-  private generateCombinedExplanation(
-    verdict: string,
-    evidence: EvidenceItem[],
-    mediaResult: InvestigationResult | null,
-    factCheckResult: InvestigationResult | null
-  ): string {
-    let explanation = `Comprehensive investigation resulted in verdict: ${verdict}. `;
-    
-    if (mediaResult && factCheckResult) {
-      explanation += `Combined analysis of media forensics and fact-checking. `;
-    } else if (mediaResult) {
-      explanation += `Based on media forensic analysis. `;
-    } else if (factCheckResult) {
-      explanation += `Based on fact-checking analysis. `;
-    }
-
-    explanation += `Total evidence sources: ${evidence.length}. `;
-
-    if (mediaResult?.forensic_analysis) {
-      const tamperingProb = mediaResult.forensic_analysis.tampering_probability || 
-                           mediaResult.forensic_analysis.manipulationProbability;
-      if (tamperingProb !== undefined) {
-        explanation += `Media tampering probability: ${Math.round(tamperingProb * 100)}%. `;
+      // Determine analysis type based on URL
+      const isVideo = /\.(mp4|avi|mov|mkv|webm)$/i.test(mediaUrl);
+      
+      if (isVideo) {
+        const result = await this.clientManager.callTool('video-forensics', 'analyze_video', {
+          video_url: mediaUrl,
+          analysis_type: 'full',
+        });
+        return result;
+      } else {
+        const result = await this.clientManager.callTool('video-forensics', 'analyze_image', {
+          image_url: mediaUrl,
+          analysis_methods: ['ela', 'noise', 'metadata'],
+        });
+        return result;
       }
+    } catch (error) {
+      console.error('Media forensics failed:', error);
+      return {
+        tampering_probability: 0.5,
+        techniques_detected: [],
+        error: error instanceof Error ? error.message : 'Unknown error',
+      };
     }
-
-    return explanation;
   }
 
-  private async generateTimeline(evidence: EvidenceItem[]): Promise<TimelineEvent[]> {
+  private async performReverseImageSearch(mediaUrl: string): Promise<EvidenceItem[]> {
+    const evidence: EvidenceItem[] = [];
+
+    try {
+      const webClient = this.clientManager.getClient('web-fetch');
+      if (webClient?.connected) {
+        // Search for similar images/content
+        const searchResults = await this.clientManager.callTool('web-fetch', 'search', {
+          query: `reverse image search: ${mediaUrl}`,
+          max_results: 5,
+        });
+
+        if (searchResults?.results) {
+          searchResults.results.forEach((result: any) => {
+            evidence.push({
+              id: CryptoUtils.generateId(),
+              type: 'reverse_image',
+              source: result.source || 'web_search',
+              content: `Similar content found: ${result.title} - ${result.snippet}`,
+              confidence: result.relevanceScore || 0.7,
+              timestamp: new Date().toISOString(),
+              metadata: result,
+            });
+          });
+        }
+      }
+    } catch (error) {
+      console.error('Reverse image search failed:', error);
+    }
+
+    return evidence;
+  }
+
+  private async gatherWebEvidence(claim: string): Promise<EvidenceItem[]> {
+    const evidence: EvidenceItem[] = [];
+
+    try {
+      const webClient = this.clientManager.getClient('web-fetch');
+      if (webClient?.connected) {
+        const searchResults = await this.clientManager.callTool('web-fetch', 'search', {
+          query: claim,
+          max_results: 10,
+        });
+
+        if (searchResults?.results) {
+          for (const result of searchResults.results.slice(0, 3)) {
+            try {
+              // Fetch the actual content
+              const pageContent = await this.clientManager.callTool('web-fetch', 'fetch_url', {
+                url: result.url,
+                timeout: 10000,
+              });
+
+              evidence.push({
+                id: CryptoUtils.generateId(),
+                type: 'web_search',
+                source: result.url,
+                content: `Web source: ${result.title} - ${result.snippet}`,
+                confidence: 0.6,
+                timestamp: new Date().toISOString(),
+                metadata: { ...result, content: pageContent?.content },
+              });
+            } catch (error) {
+              console.warn(`Failed to fetch ${result.url}:`, error);
+            }
+          }
+        }
+      }
+    } catch (error) {
+      console.error('Web evidence gathering failed:', error);
+    }
+
+    return evidence;
+  }
+
+  private async generateTimeline(evidence: EvidenceItem[], forensics: any): Promise<TimelineEvent[]> {
     const timeline: TimelineEvent[] = [];
 
-    // Sort evidence by timestamp
-    const sortedEvidence = evidence.sort((a, b) => 
-      new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
-    );
-
-    sortedEvidence.forEach((item, index) => {
-      let eventType: TimelineEvent['event_type'] = 'spread';
+    // Add evidence points to timeline
+    evidence.forEach(item => {
+      let eventType: TimelineEvent['event_type'] = 'fact_check';
       
-      if (item.type === 'fact_check') eventType = 'fact_check';
-      else if (item.type === 'reverse_image' && index === 0) eventType = 'first_appearance';
-      else if (item.type === 'forensic') eventType = 'modification';
+      if (item.type === 'forensic') eventType = 'modification';
+      else if (item.type === 'reverse_image') eventType = 'first_appearance';
+      else if (item.type === 'web_search') eventType = 'spread';
 
       timeline.push({
         timestamp: item.timestamp,
         event_type: eventType,
-        description: this.summarizeEvidenceItem(item),
+        description: item.content,
         source: item.source,
         confidence: item.confidence,
-        media_snapshot: item.metadata?.thumbnail || item.metadata?.media_snapshot,
       });
     });
 
-    return timeline;
-  }
-
-  private summarizeEvidenceItem(item: EvidenceItem): string {
-    switch (item.type) {
-      case 'fact_check':
-        return `Fact-check result: ${item.content.substring(0, 100)}...`;
-      case 'forensic':
-        return `Forensic analysis: ${item.content.substring(0, 100)}...`;
-      case 'web_search':
-        return `Web evidence: ${item.content.substring(0, 100)}...`;
-      case 'reverse_image':
-        return `Similar content found: ${item.content.substring(0, 100)}...`;
-      case 'archive':
-        return `Archive entry: ${item.content.substring(0, 100)}...`;
-      default:
-        return item.content.substring(0, 100) + '...';
+    // Add forensic timeline events
+    if (forensics?.timeline) {
+      forensics.timeline.forEach((event: any) => {
+        timeline.push({
+          timestamp: new Date(Date.now() - event.timestamp * 1000).toISOString(),
+          event_type: 'modification',
+          description: event.event,
+          source: 'forensic_analysis',
+          confidence: event.confidence,
+        });
+      });
     }
+
+    // Sort by timestamp
+    return timeline.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
   }
 
-  private async generateCounterfactuals(claim: string, evidence: EvidenceItem[]): Promise<CounterfactualNarrative[]> {
-    // Mock counterfactual generation - in production, this would use LLM
-    const counterfactuals: CounterfactualNarrative[] = [];
+  private synthesizeVerdict(
+    evidence: EvidenceItem[],
+    forensics: any,
+    claim?: string
+  ): { verdict: InvestigationResult['verdict']; confidence: number; explanation: string } {
+    let trueScore = 0;
+    let falseScore = 0;
+    let totalWeight = 0;
 
-    // Generate plausible alternative narratives
-    const baseNarrative = `Alternative interpretation: ${claim} could be accurate if`;
+    // Analyze evidence
+    evidence.forEach(item => {
+      const weight = item.confidence;
+      totalWeight += weight;
+
+      if (item.type === 'fact_check') {
+        // Parse fact-check results
+        if (item.content.toLowerCase().includes('false') || item.content.toLowerCase().includes('incorrect')) {
+          falseScore += weight;
+        } else if (item.content.toLowerCase().includes('true') || item.content.toLowerCase().includes('correct')) {
+          trueScore += weight;
+        }
+      } else if (item.type === 'forensic') {
+        // High tampering probability suggests false
+        const tamperingProb = forensics?.tampering_probability || 0;
+        if (tamperingProb > 0.7) {
+          falseScore += weight * tamperingProb;
+        }
+      }
+    });
+
+    // Determine verdict
+    let verdict: InvestigationResult['verdict'] = 'UNVERIFIED';
+    let confidence = 0.5;
+
+    if (totalWeight > 0) {
+      const trueRatio = trueScore / totalWeight;
+      const falseRatio = falseScore / totalWeight;
+      
+      if (falseRatio > 0.6) {
+        verdict = 'FALSE';
+        confidence = Math.min(falseRatio, 0.95);
+      } else if (trueRatio > 0.6) {
+        verdict = 'TRUE';
+        confidence = Math.min(trueRatio, 0.95);
+      } else if (trueRatio > 0.3 && falseRatio > 0.3) {
+        verdict = 'MIXED';
+        confidence = Math.min((trueRatio + falseRatio) / 2, 0.8);
+      }
+    }
+
+    const explanation = this.generateExplanation(verdict, confidence, evidence.length, forensics);
+
+    return { verdict, confidence, explanation };
+  }
+
+  private generateExplanation(verdict: string, confidence: number, evidenceCount: number, forensics: any): string {
+    const confidencePercent = Math.round(confidence * 100);
+    let explanation = `Based on analysis of ${evidenceCount} evidence sources, this claim is assessed as ${verdict} with ${confidencePercent}% confidence. `;
+
+    if (forensics) {
+      const tamperingProb = Math.round((forensics.tampering_probability || 0) * 100);
+      explanation += `Media forensic analysis indicates ${tamperingProb}% probability of tampering. `;
+    }
+
+    if (verdict === 'FALSE') {
+      explanation += 'Multiple reliable sources contradict this claim.';
+    } else if (verdict === 'TRUE') {
+      explanation += 'Evidence from credible sources supports this claim.';
+    } else if (verdict === 'MIXED') {
+      explanation += 'Evidence shows both supporting and contradicting information.';
+    } else {
+      explanation += 'Insufficient evidence available for definitive assessment.';
+    }
+
+    return explanation;
+  }
+
+  private detectTechniques(evidence: EvidenceItem[], forensics: any): string[] {
+    const techniques: string[] = [];
+
+    // From forensic analysis
+    if (forensics?.techniques_detected) {
+      techniques.push(...forensics.techniques_detected);
+    }
+
+    // From evidence patterns
+    const hasMultipleSources = evidence.filter(e => e.type === 'fact_check').length > 1;
+    const hasForensicEvidence = evidence.some(e => e.type === 'forensic');
+    const hasReverseSearch = evidence.some(e => e.type === 'reverse_image');
+
+    if (hasMultipleSources) techniques.push('cross_reference_analysis');
+    if (hasForensicEvidence) techniques.push('digital_forensics');
+    if (hasReverseSearch) techniques.push('reverse_image_search');
+
+    return [...new Set(techniques)];
+  }
+
+  private generateMicroLesson(techniques: string[], verdict: string): any {
+    const primaryTechnique = techniques[0] || 'fact_checking';
     
-    counterfactuals.push({
-      narrative: `${baseNarrative} the evidence sources are incomplete or biased.`,
-      plausibility_score: 0.3,
-      evidence_gaps: ['Missing primary sources', 'Limited fact-checker coverage'],
-      citations: evidence.slice(0, 2).map(e => e.source),
-    });
-
-    if (evidence.some(e => e.type === 'forensic')) {
-      counterfactuals.push({
-        narrative: `${baseNarrative} the forensic analysis has false positives due to compression artifacts.`,
-        plausibility_score: 0.4,
-        evidence_gaps: ['Technical analysis limitations', 'Compression effects'],
-        citations: evidence.filter(e => e.type === 'forensic').map(e => e.source),
-      });
-    }
-
-    counterfactuals.push({
-      narrative: `${baseNarrative} the context or timing has been misunderstood.`,
-      plausibility_score: 0.5,
-      evidence_gaps: ['Historical context', 'Timeline verification'],
-      citations: evidence.slice(-2).map(e => e.source),
-    });
-
-    return counterfactuals.sort((a, b) => b.plausibility_score - a.plausibility_score);
-  }
-
-  private async createMicroLesson(technique: string): Promise<MicroLesson> {
-    // Mock micro-lesson creation - in production would be more sophisticated
-    const lessons: Record<string, MicroLesson> = {
-      'misinformation_detection': {
-        technique: 'Misinformation Detection',
-        explanation: 'Learn to identify common signs of misinformation by checking sources, dates, and context.',
+    const lessons: Record<string, any> = {
+      fact_checking: {
+        technique: 'Fact-Checking Basics',
+        explanation: 'Fact-checking involves verifying claims against reliable, authoritative sources. Always check multiple sources and look for primary evidence.',
+        duration_seconds: 60,
         interactive_elements: [
           {
             type: 'question',
-            content: 'What should you check first when evaluating a claim?',
-            correct_answer: 'The original source and publication date',
-          },
+            content: 'What should you do when you see a claim on social media?',
+            correct_answer: 'Check multiple reliable sources before sharing or believing it.',
+          }
+        ],
+      },
+      digital_forensics: {
+        technique: 'Digital Media Analysis',
+        explanation: 'Digital forensics can detect signs of manipulation in images and videos by analyzing compression artifacts, noise patterns, and metadata.',
+        duration_seconds: 90,
+        interactive_elements: [
           {
             type: 'visual_comparison',
-            content: 'Compare these two versions of the same story - what differences do you notice?',
-          },
+            content: 'Manipulated images often show inconsistent lighting, shadows, or image quality in different areas.',
+          }
         ],
+      },
+      reverse_image_search: {
+        technique: 'Reverse Image Search',
+        explanation: 'Use reverse image search to find the original source of images and check if they have been used in different contexts.',
         duration_seconds: 45,
-      },
-      'media_manipulation_detection': {
-        technique: 'Media Manipulation Detection',
-        explanation: 'Understand how to spot digitally altered images and videos using forensic techniques.',
-        interactive_elements: [
-          {
-            type: 'visual_comparison',
-            content: 'Examine these compression artifacts - what do they tell us about editing?',
-          },
-          {
-            type: 'question',
-            content: 'Which technique is most reliable for detecting image manipulation?',
-            correct_answer: 'Error Level Analysis (ELA) combined with metadata examination',
-          },
-        ],
-        duration_seconds: 40,
-      },
-      'comprehensive_fact_checking': {
-        technique: 'Comprehensive Fact Checking',
-        explanation: 'Master the complete fact-checking process from initial assessment to final verification.',
         interactive_elements: [
           {
             type: 'question',
-            content: 'What is the most important step in comprehensive fact-checking?',
-            correct_answer: 'Cross-referencing multiple independent sources',
-          },
-          {
-            type: 'visual_comparison',
-            content: 'Review this evidence chain - how would you rate its reliability?',
-          },
+            content: 'How can you verify if an image is being used out of context?',
+            correct_answer: 'Use reverse image search to find the original source and publication date.',
+          }
         ],
-        duration_seconds: 50,
       },
     };
 
-    return lessons[technique] || lessons['misinformation_detection'];
+    return lessons[primaryTechnique] || lessons['fact_checking'];
   }
 
-  private async generateClaimReviewJsonLd(
-    claim: string,
-    result: { verdict: string; confidence: number },
-    evidence: EvidenceItem[]
-  ): Promise<any> {
-    const now = new Date().toISOString();
-    
+  private generateJsonLD(data: any): any {
     return {
-      "@context": "https://schema.org",
-      "@type": "ClaimReview",
-      "url": `https://factcheck-platform.example.com/review/${this.generateId()}`,
-      "claimReviewed": claim,
-      "author": {
-        "@type": "Organization",
-        "name": "AI Fact-Check Platform",
-        "url": "https://factcheck-platform.example.com"
+      '@context': 'https://schema.org',
+      '@type': 'FactCheck',
+      datePublished: new Date().toISOString(),
+      url: `https://factcheck-platform.example.com/investigation/${data.id}`,
+      claimReviewed: data.request.content.claim,
+      reviewRating: {
+        '@type': 'Rating',
+        ratingValue: data.verdict,
+        ratingExplanation: data.explanation,
+        confidence: data.confidence,
       },
-      "datePublished": now,
-      "reviewRating": {
-        "@type": "Rating",
-        "ratingValue": this.verdictToRating(result.verdict),
-        "bestRating": 5,
-        "worstRating": 1,
-        "alternateName": result.verdict
+      author: {
+        '@type': 'Organization',
+        name: 'AI Misinformation Detection System',
       },
-      "itemReviewed": {
-        "@type": "Claim",
-        "text": claim,
-        "datePublished": now
-      },
-      "evidence": evidence.slice(0, 5).map(e => ({
-        "@type": "WebPage",
-        "url": e.source,
-        "description": e.content.substring(0, 200),
-        "datePublished": e.timestamp
-      }))
     };
-  }
-
-  private verdictToRating(verdict: string): number {
-    switch (verdict) {
-      case 'TRUE': return 5;
-      case 'MIXED': return 3;
-      case 'FALSE': return 1;
-      case 'UNVERIFIED': return 2;
-      default: return 2;
-    }
-  }
-
-  private computeSha256(data: string): string {
-    const crypto = require('crypto');
-    return crypto.createHash('sha256').update(data).digest('hex');
-  }
-
-  private signArtifact(artifact: string): string {
-    const crypto = require('crypto');
-    const secret = process.env.SIGNING_SECRET || 'dev-secret';
-    return crypto.createHmac('sha256', secret).update(artifact).digest('hex');
-  }
-
-  // Public methods for retrieving investigation history
-  async getInvestigation(id: string): Promise<InvestigationResult | null> {
-    return this.investigationHistory.get(id) || null;
-  }
-
-  async listInvestigations(): Promise<string[]> {
-    return Array.from(this.investigationHistory.keys());
   }
 
   async exportInvestigation(id: string): Promise<any> {
-    const investigation = this.investigationHistory.get(id);
+    const investigation = this.investigations.get(id);
     if (!investigation) {
       throw new Error(`Investigation ${id} not found`);
     }
 
     return {
-      investigation,
-      exportFormat: 'ClaimReview+Evidence',
-      exportedAt: new Date().toISOString(),
-      verification: {
-        signature: investigation.signed_artifact.signature,
-        hash: investigation.signed_artifact.sha256,
-      },
+      ...investigation,
+      export_timestamp: new Date().toISOString(),
+      format_version: '1.0',
     };
   }
 
-  // Cleanup and resource management
+  async listInvestigations(): Promise<string[]> {
+    return Array.from(this.investigations.keys());
+  }
+
+  async getInvestigation(id: string): Promise<InvestigationResult | null> {
+    return this.investigations.get(id) || null;
+  }
+
   async cleanup(): Promise<void> {
-    console.log('Shutting down MCP clients...');
-    
-    for (const [name, client] of this.clients) {
-      try {
-        await client.close();
-        console.log(`Closed ${name} client`);
-      } catch (error) {
-        console.error(`Error closing ${name} client:`, error);
-      }
-    }
-    
-    this.clients.clear();
+    // Cleanup resources if needed
+    console.log('Orchestrator cleanup completed');
   }
 }

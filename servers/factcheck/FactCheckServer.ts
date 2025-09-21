@@ -1,8 +1,8 @@
-import { BaseServer } from '../../base/BaseServer.js';
+import { BaseServer } from '../../base/BaseServer';
 import { Tool, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
-import { FactCheckResult, Evidence } from '../../types/factcheck.types.js';
-import { GoogleFactCheckService, GoogleFactCheckClaim } from '../../services/google-factcheck.service.js';
-import { CryptoUtils } from '../../utils/crypto.utils.js';
+import { FactCheckResult, Evidence } from '../../types/factcheck.types';
+import { GoogleFactCheckService, GoogleFactCheckClaim } from '../../services/google-factcheck.service';
+import { CryptoUtils } from '../../utils/crypto.utils';
 
 export class FactCheckServer extends BaseServer {
   protected serverName = "factcheck-mcp";
@@ -12,7 +12,7 @@ export class FactCheckServer extends BaseServer {
   private googleService: GoogleFactCheckService;
 
   constructor() {
-    super();
+    super("factcheck-mcp", "1.0.0", "MCP server for fact-checking claims with evidence chain");
     this.googleService = new GoogleFactCheckService(process.env.GOOGLE_FACTCHECK_API_KEY);
   }
 

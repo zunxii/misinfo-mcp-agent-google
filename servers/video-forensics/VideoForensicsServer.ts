@@ -1,13 +1,13 @@
-import { BaseServer } from '../../base/BaseServer.js';
+import { BaseServer } from '../../base/BaseServer';
 import { Tool, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import { 
   VideoForensicsResult, 
   ForensicFrame, 
   AudioAnalysis 
-} from '../../types/video-forensics.types.js';
-import { MediaAnalysisService } from '../../services/media-analysis.service.js';
-import { FileUtils } from '../../utils/file.utils.js';
-import { CryptoUtils } from '../../utils/crypto.utils.js';
+} from '../../types/video-forensics.types';
+import { MediaAnalysisService } from '../../services/media-analysis.service';
+import { FileUtils } from '../../utils/file.utils';
+import { CryptoUtils } from '../../utils/crypto.utils';
 import path from 'path';
 
 export class VideoForensicsServer extends BaseServer {
@@ -19,7 +19,11 @@ export class VideoForensicsServer extends BaseServer {
   private mediaService: MediaAnalysisService;
 
   constructor() {
-    super();
+    super(
+      "video-forensics-mcp",
+      "1.0.0",
+      "MCP server for video and image forensic analysis"
+    );
     this.tempDir = process.env.TEMP_DIR || '/tmp/video-forensics';
     this.mediaService = new MediaAnalysisService();
     this.ensureTempDir();

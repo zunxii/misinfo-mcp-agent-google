@@ -10,14 +10,15 @@ import {
   Clock, 
   Eye,
   Download,
-  Play,
-  Pause,
   ExternalLink,
   Shield,
   Brain,
   Image as ImageIcon,
   Video,
-  FileText
+  FileText,
+  Activity,
+  RefreshCw,
+  AlertCircle
 } from 'lucide-react';
 
 interface EvidenceItem {
@@ -59,10 +60,24 @@ interface InvestigationResult {
   processing_time_ms?: number;
 }
 
+interface ApiError {
+  error: string;
+  message: string;
+  timestamp?: string;
+}
+
+interface HealthStatus {
+  status: string;
+  servers?: { [key: string]: boolean };
+  connected_count?: number;
+  total_servers?: number;
+  available_tools?: { [key: string]: any[] };
+}
+
 export default function ChatUI() {
   const [messages, setMessages] = useState<Array<{
     id: string;
-    type: 'user' | 'assistant';
+    type: 'user' | 'assistant' | 'error';
     content: string;
     result?: InvestigationResult;
     timestamp: Date;
@@ -74,6 +89,13 @@ export default function ChatUI() {
   const [isLoading, setIsLoading] = useState(false);
   const [investigationType, setInvestigationType] = useState<'fact_check' | 'media_analysis' | 'full_investigation'>('full_investigation');
   const [activeTab, setActiveTab] = useState<'evidence' | 'timeline' | 'forensics' | 'lesson'>('evidence');
+  const [healthStatus, setHealthStatus] = useState<HealthStatus | null>(null);
+  const [showAdvancedOptions, setShowAdvancedOptions] = useState(false);
+  const [options, setOptions] = useState({
+    include_forensics: true,
+    generate_lesson: true,
+    create_timeline: true,
+  });
   
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -82,16 +104,47 @@ export default function ChatUI() {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
+  // Check API health on component mount
+  useEffect(() => {
+    checkHealth();
+  }, []);
+
+  const checkHealth = async () => {
+    try {
+      const response = await fetch('/api/agent?action=health');
+      const health = await response.json();
+      setHealthStatus(health);
+    } catch (error) {
+      console.error('Health check failed:', error);
+      setHealthStatus({
+        status: 'error',
+        connected_count: 0,
+        total_servers: 0,
+      });
+    }
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!input.trim() && !mediaFile && !mediaUrl) return;
+
+    // Validate based on investigation type
+    if (investigationType === 'fact_check' && !input.trim()) {
+      alert('Please enter a claim for fact-checking');
+      return;
+    }
+    
+    if (investigationType === 'media_analysis' && !mediaUrl && !mediaFile) {
+      alert('Please provide a media URL or upload a file for media analysis');
+      return;
+    }
 
     setIsLoading(true);
     
     const userMessage = {
       id: Date.now().toString(),
       type: 'user' as const,
-      content: input || 'Media analysis request',
+      content: input || `${investigationType.replace('_', ' ')} request`,
       timestamp: new Date(),
     };
 
@@ -102,23 +155,22 @@ export default function ChatUI() {
       const requestData = {
         type: investigationType,
         content: {
-          claim: input || undefined,
-          media_url: mediaUrl || undefined,
-          context: `User submitted ${investigationType} request`,
+          ...(input.trim() && { claim: input }),
+          ...(mediaUrl && { media_url: mediaUrl }),
+          ...(input && { context: `User submitted ${investigationType} request` }),
         },
-        options: {
-          include_forensics: true,
-          generate_lesson: true,
-          create_timeline: true,
-        },
+        options: options,
       };
 
       // Handle file upload if present
       if (mediaFile) {
-        // In a real implementation, you'd upload the file and get a URL
+        // Convert file to base64 or create a mock URL for demo
         const mockUrl = `https://example.com/uploads/${mediaFile.name}`;
         requestData.content.media_url = mockUrl;
+        // In production, you would upload the file first and get a real URL
       }
+
+      console.log('Sending request:', requestData);
 
       const response = await fetch('/api/agent', {
         method: 'POST',
@@ -128,27 +180,29 @@ export default function ChatUI() {
         body: JSON.stringify(requestData),
       });
 
-      const result: InvestigationResult = await response.json();
+      const result = await response.json();
 
       if (!response.ok) {
-        throw new Error(result.error || 'Investigation failed');
+        throw new Error(result.message || result.error || 'Investigation failed');
       }
 
       const assistantMessage = {
         id: (Date.now() + 1).toString(),
         type: 'assistant' as const,
-        content: result.explanation,
-        result,
+        content: result.explanation || 'Investigation completed successfully',
+        result: result as InvestigationResult,
         timestamp: new Date(),
       };
 
       setMessages(prev => [...prev, assistantMessage]);
 
     } catch (error) {
+      console.error('Investigation error:', error);
+      
       const errorMessage = {
         id: (Date.now() + 1).toString(),
-        type: 'assistant' as const,
-        content: `Error: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        type: 'error' as const,
+        content: `Investigation failed: ${error instanceof Error ? error.message : 'Unknown error occurred'}`,
         timestamp: new Date(),
       };
       
@@ -164,6 +218,19 @@ export default function ChatUI() {
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
+      // Validate file size (50MB max)
+      if (file.size > 50 * 1024 * 1024) {
+        alert('File size must be less than 50MB');
+        return;
+      }
+      
+      // Validate file type
+      const validTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'video/mp4', 'video/avi', 'video/mov'];
+      if (!validTypes.includes(file.type)) {
+        alert('Please select a valid image or video file (JPG, PNG, GIF, MP4, AVI, MOV)');
+        return;
+      }
+      
       setMediaFile(file);
       setMediaUrl(''); // Clear URL if file is selected
     }
@@ -198,6 +265,11 @@ export default function ChatUI() {
   const downloadEvidence = async (result: InvestigationResult) => {
     try {
       const response = await fetch(`/api/agent?action=export&id=${result.id}`);
+      
+      if (!response.ok) {
+        throw new Error('Export failed');
+      }
+      
       const blob = await response.blob();
       
       const url = window.URL.createObjectURL(blob);
@@ -208,107 +280,117 @@ export default function ChatUI() {
       document.body.appendChild(a);
       a.click();
       window.URL.revokeObjectURL(url);
+      document.body.removeChild(a);
     } catch (error) {
       console.error('Download failed:', error);
+      alert('Failed to download evidence file');
     }
   };
 
   const renderEvidenceChain = (evidence: EvidenceItem[]) => (
     <div className="space-y-3">
-      {evidence.map((item, index) => (
-        <div key={item.id} className="border rounded-lg p-4 bg-white">
-          <div className="flex items-center justify-between mb-2">
-            <div className="flex items-center space-x-2">
-              <div className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold text-white ${
-                item.type === 'fact_check' ? 'bg-blue-600' :
-                item.type === 'forensic' ? 'bg-purple-600' :
-                item.type === 'web_search' ? 'bg-green-600' :
-                item.type === 'reverse_image' ? 'bg-orange-600' :
-                'bg-gray-600'
-              }`}>
-                {index + 1}
+      {evidence.length === 0 ? (
+        <p className="text-gray-500 text-sm italic">No evidence collected</p>
+      ) : (
+        evidence.map((item, index) => (
+          <div key={item.id} className="border rounded-lg p-4 bg-white">
+            <div className="flex items-center justify-between mb-2">
+              <div className="flex items-center space-x-2">
+                <div className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold text-white ${
+                  item.type === 'fact_check' ? 'bg-blue-600' :
+                  item.type === 'forensic' ? 'bg-purple-600' :
+                  item.type === 'web_search' ? 'bg-green-600' :
+                  item.type === 'reverse_image' ? 'bg-orange-600' :
+                  'bg-gray-600'
+                }`}>
+                  {index + 1}
+                </div>
+                <span className="font-medium text-sm capitalize">{item.type.replace('_', ' ')}</span>
+                <div className={`px-2 py-1 rounded text-xs font-medium ${
+                  item.confidence > 0.8 ? 'bg-green-100 text-green-800' :
+                  item.confidence > 0.6 ? 'bg-yellow-100 text-yellow-800' :
+                  'bg-red-100 text-red-800'
+                }`}>
+                  {Math.round(item.confidence * 100)}% confidence
+                </div>
               </div>
-              <span className="font-medium text-sm capitalize">{item.type.replace('_', ' ')}</span>
-              <div className={`px-2 py-1 rounded text-xs font-medium ${
-                item.confidence > 0.8 ? 'bg-green-100 text-green-800' :
-                item.confidence > 0.6 ? 'bg-yellow-100 text-yellow-800' :
-                'bg-red-100 text-red-800'
-              }`}>
-                {Math.round(item.confidence * 100)}% confidence
-              </div>
+              <span className="text-xs text-gray-500">
+                {new Date(item.timestamp).toLocaleString()}
+              </span>
             </div>
-            <span className="text-xs text-gray-500">
-              {new Date(item.timestamp).toLocaleString()}
-            </span>
+            
+            <p className="text-sm text-gray-700 mb-2">{item.content}</p>
+            
+            <div className="flex items-center justify-between text-xs text-gray-500">
+              <span>Source: {item.source}</span>
+              {item.source.startsWith('http') && (
+                <a 
+                  href={item.source} 
+                  target="_blank" 
+                  rel="noopener noreferrer"
+                  className="flex items-center space-x-1 text-blue-600 hover:text-blue-800"
+                >
+                  <ExternalLink className="h-3 w-3" />
+                  <span>View</span>
+                </a>
+              )}
+            </div>
           </div>
-          
-          <p className="text-sm text-gray-700 mb-2">{item.content}</p>
-          
-          <div className="flex items-center justify-between text-xs text-gray-500">
-            <span>Source: {item.source}</span>
-            {item.source.startsWith('http') && (
-              <a 
-                href={item.source} 
-                target="_blank" 
-                rel="noopener noreferrer"
-                className="flex items-center space-x-1 text-blue-600 hover:text-blue-800"
-              >
-                <ExternalLink className="h-3 w-3" />
-                <span>View</span>
-              </a>
-            )}
-          </div>
-        </div>
-      ))}
+        ))
+      )}
     </div>
   );
 
   const renderTimeline = (timeline: TimelineEvent[]) => (
     <div className="space-y-4">
-      {timeline.map((event, index) => (
-        <div key={index} className="flex items-start space-x-4">
-          <div className={`w-8 h-8 rounded-full flex items-center justify-center ${
-            event.event_type === 'first_appearance' ? 'bg-blue-100 text-blue-600' :
-            event.event_type === 'modification' ? 'bg-red-100 text-red-600' :
-            event.event_type === 'spread' ? 'bg-yellow-100 text-yellow-600' :
-            'bg-green-100 text-green-600'
-          }`}>
-            {event.event_type === 'first_appearance' && <Eye className="h-4 w-4" />}
-            {event.event_type === 'modification' && <AlertTriangle className="h-4 w-4" />}
-            {event.event_type === 'spread' && <Eye className="h-4 w-4" />}
-            {event.event_type === 'fact_check' && <Shield className="h-4 w-4" />}
-          </div>
-          
-          <div className="flex-1 min-w-0">
-            <div className="flex items-center justify-between">
-              <p className="text-sm font-medium text-gray-900 capitalize">
-                {event.event_type.replace('_', ' ')}
-              </p>
-              <span className="text-xs text-gray-500">
-                {new Date(event.timestamp).toLocaleString()}
-              </span>
+      {!timeline || timeline.length === 0 ? (
+        <p className="text-gray-500 text-sm italic">No timeline data available</p>
+      ) : (
+        timeline.map((event, index) => (
+          <div key={index} className="flex items-start space-x-4">
+            <div className={`w-8 h-8 rounded-full flex items-center justify-center ${
+              event.event_type === 'first_appearance' ? 'bg-blue-100 text-blue-600' :
+              event.event_type === 'modification' ? 'bg-red-100 text-red-600' :
+              event.event_type === 'spread' ? 'bg-yellow-100 text-yellow-600' :
+              'bg-green-100 text-green-600'
+            }`}>
+              {event.event_type === 'first_appearance' && <Eye className="h-4 w-4" />}
+              {event.event_type === 'modification' && <AlertTriangle className="h-4 w-4" />}
+              {event.event_type === 'spread' && <Activity className="h-4 w-4" />}
+              {event.event_type === 'fact_check' && <Shield className="h-4 w-4" />}
             </div>
             
-            <p className="text-sm text-gray-600 mt-1">{event.description}</p>
-            
-            <div className="flex items-center justify-between mt-2">
-              <span className="text-xs text-gray-500">Source: {event.source}</span>
-              <div className={`px-2 py-1 rounded text-xs font-medium ${
-                event.confidence > 0.8 ? 'bg-green-100 text-green-800' :
-                event.confidence > 0.6 ? 'bg-yellow-100 text-yellow-800' :
-                'bg-red-100 text-red-800'
-              }`}>
-                {Math.round(event.confidence * 100)}%
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center justify-between">
+                <p className="text-sm font-medium text-gray-900 capitalize">
+                  {event.event_type.replace('_', ' ')}
+                </p>
+                <span className="text-xs text-gray-500">
+                  {new Date(event.timestamp).toLocaleString()}
+                </span>
+              </div>
+              
+              <p className="text-sm text-gray-600 mt-1">{event.description}</p>
+              
+              <div className="flex items-center justify-between mt-2">
+                <span className="text-xs text-gray-500">Source: {event.source}</span>
+                <div className={`px-2 py-1 rounded text-xs font-medium ${
+                  event.confidence > 0.8 ? 'bg-green-100 text-green-800' :
+                  event.confidence > 0.6 ? 'bg-yellow-100 text-yellow-800' :
+                  'bg-red-100 text-red-800'
+                }`}>
+                  {Math.round(event.confidence * 100)}%
+                </div>
               </div>
             </div>
           </div>
-        </div>
-      ))}
+        ))
+      )}
     </div>
   );
 
   const renderForensics = (forensics: any) => {
-    if (!forensics) return <p className="text-gray-500">No forensic analysis available</p>;
+    if (!forensics) return <p className="text-gray-500 text-sm italic">No forensic analysis available</p>;
 
     return (
       <div className="space-y-4">
@@ -318,7 +400,7 @@ export default function ChatUI() {
             Analysis Summary
           </h4>
           
-          <div className="grid grid-cols-2 gap-4 mb-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
             <div>
               <span className="text-xs text-gray-500">Tampering Probability</span>
               <div className="mt-1">
@@ -343,9 +425,9 @@ export default function ChatUI() {
           </div>
 
           {forensics.suspicious_frames && forensics.suspicious_frames.length > 0 && (
-            <div>
-              <span className="text-xs text-gray-500">Suspicious Frames</span>
-              <div className="mt-2 space-y-2">
+            <div className="mb-4">
+              <span className="text-xs text-gray-500 mb-2 block">Suspicious Frames</span>
+              <div className="space-y-2">
                 {forensics.suspicious_frames.slice(0, 3).map((frame: any, index: number) => (
                   <div key={index} className="flex items-center justify-between bg-gray-50 p-2 rounded">
                     <span className="text-sm">Frame {frame.frameIndex} ({frame.timestamp.toFixed(1)}s)</span>
@@ -354,19 +436,33 @@ export default function ChatUI() {
                     </span>
                   </div>
                 ))}
+                {forensics.suspicious_frames.length > 3 && (
+                  <p className="text-xs text-gray-500">
+                    ...and {forensics.suspicious_frames.length - 3} more suspicious frames
+                  </p>
+                )}
               </div>
             </div>
           )}
 
           {forensics.techniques_detected && forensics.techniques_detected.length > 0 && (
-            <div className="mt-4">
-              <span className="text-xs text-gray-500">Techniques Detected</span>
-              <div className="mt-2 flex flex-wrap gap-2">
+            <div>
+              <span className="text-xs text-gray-500 mb-2 block">Techniques Detected</span>
+              <div className="flex flex-wrap gap-2">
                 {forensics.techniques_detected.map((technique: string, index: number) => (
                   <span key={index} className="px-2 py-1 bg-red-100 text-red-800 text-xs rounded">
                     {technique.replace('_', ' ')}
                   </span>
                 ))}
+              </div>
+            </div>
+          )}
+
+          {forensics.error && (
+            <div className="mt-4 p-3 bg-red-50 border border-red-200 rounded">
+              <div className="flex items-center">
+                <AlertCircle className="h-4 w-4 text-red-600 mr-2" />
+                <span className="text-sm text-red-800">Forensic analysis encountered an error: {forensics.error}</span>
               </div>
             </div>
           )}
@@ -376,7 +472,7 @@ export default function ChatUI() {
   };
 
   const renderMicroLesson = (lesson: any) => {
-    if (!lesson) return <p className="text-gray-500">No micro-lesson available</p>;
+    if (!lesson) return <p className="text-gray-500 text-sm italic">No micro-lesson available</p>;
 
     return (
       <div className="bg-white border rounded-lg p-4">
@@ -423,8 +519,39 @@ export default function ChatUI() {
     <div className="flex flex-col h-screen bg-gray-50">
       {/* Header */}
       <div className="bg-white border-b px-4 py-3">
-        <h1 className="text-xl font-bold text-gray-900">AI Misinformation Detector</h1>
-        <p className="text-sm text-gray-600">Fact-check claims and analyze media with evidence-backed investigations</p>
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-xl font-bold text-gray-900">AI Misinformation Detector</h1>
+            <p className="text-sm text-gray-600">Fact-check claims and analyze media with evidence-backed investigations</p>
+          </div>
+          
+          {/* Health Status */}
+          <div className="flex items-center space-x-2">
+            <button
+              onClick={checkHealth}
+              className="flex items-center space-x-1 px-3 py-2 text-sm border rounded hover:bg-gray-50"
+              title="Refresh health status"
+            >
+              <RefreshCw className="h-4 w-4" />
+              <span>Health</span>
+            </button>
+            
+            <div className={`flex items-center space-x-2 px-3 py-2 rounded text-sm ${
+              healthStatus?.status === 'healthy' ? 'bg-green-100 text-green-800' :
+              healthStatus?.status === 'degraded' ? 'bg-yellow-100 text-yellow-800' :
+              'bg-red-100 text-red-800'
+            }`}>
+              <div className={`w-2 h-2 rounded-full ${
+                healthStatus?.status === 'healthy' ? 'bg-green-600' :
+                healthStatus?.status === 'degraded' ? 'bg-yellow-600' :
+                'bg-red-600'
+              }`}></div>
+              <span>
+                {healthStatus?.connected_count || 0}/{healthStatus?.total_servers || 0} services
+              </span>
+            </div>
+          </div>
+        </div>
       </div>
 
       {/* Messages */}
@@ -456,19 +583,21 @@ export default function ChatUI() {
         )}
 
         {messages.map((message) => (
-          <div key={message.id} className={`flex ${message.type === 'user' ? 'justify-end' : 'justify-start'}`}>
-            <div className={`max-w-4xl w-full ${message.type === 'user' ? 'ml-4' : 'mr-4'}`}>
-              <div className={`rounded-lg p-4 ${
+          <div key={message.id} className={`flex text-black ${message.type === 'user' ? 'justify-end' : 'justify-start'}`}>
+            <div className={`max-w-4xl w-full text-black   ${message.type === 'user' ? 'ml-4' : 'mr-4'}`}>
+              <div className={`rounded-lg p-4 text-black ${
                 message.type === 'user' 
                   ? 'bg-blue-600 text-white' 
+                  : message.type === 'error'
+                  ? 'bg-red-50 border border-red-200 text-red-800'
                   : 'bg-white border'
               }`}>
-                <p className="text-sm">{message.content}</p>
+                <p className="text-sm text-black">{message.content}</p>
                 
                 {message.result && (
-                  <div className="mt-4 space-y-4">
+                  <div className="mt-4 space-y-4 text-black">
                     {/* Verdict Card */}
-                    <div className={`border-2 rounded-lg p-4 ${getVerdictColor(message.result.verdict)}`}>
+                    <div className={`border-2 rounded-lg text-black p-4 ${getVerdictColor(message.result.verdict)}`}>
                       <div className="flex items-center justify-between mb-2">
                         <div className="flex items-center space-x-2">
                           {getVerdictIcon(message.result.verdict)}
@@ -491,7 +620,7 @@ export default function ChatUI() {
                       <nav className="flex space-x-8">
                         {[
                           { id: 'evidence', label: 'Evidence', icon: FileText },
-                          { id: 'timeline', label: 'Timeline', icon: AlertTriangle },
+                          { id: 'timeline', label: 'Timeline', icon: Activity },
                           { id: 'forensics', label: 'Forensics', icon: Eye },
                           { id: 'lesson', label: 'Learn', icon: Brain },
                         ].map((tab) => (
@@ -517,9 +646,9 @@ export default function ChatUI() {
                     </div>
 
                     {/* Tab Content */}
-                    <div className="bg-gray-50 rounded-lg p-4 max-h-96 overflow-y-auto">
+                    <div className="bg-gray-50 rounded-lg p-4 max-h-96 overflow-y-auto text-black">
                       {activeTab === 'evidence' && renderEvidenceChain(message.result.evidence_chain)}
-                      {activeTab === 'timeline' && message.result.timeline && renderTimeline(message.result.timeline)}
+                      {activeTab === 'timeline' && renderTimeline(message.result.timeline || [])}
                       {activeTab === 'forensics' && renderForensics(message.result.forensic_analysis)}
                       {activeTab === 'lesson' && renderMicroLesson(message.result.micro_lesson)}
                     </div>
@@ -581,6 +710,36 @@ export default function ChatUI() {
             ))}
           </div>
 
+          {/* Advanced Options Toggle */}
+          <div className="flex items-center justify-between">
+            <button
+              type="button"
+              onClick={() => setShowAdvancedOptions(!showAdvancedOptions)}
+              className="text-sm text-gray-600 hover:text-gray-800"
+            >
+              {showAdvancedOptions ? 'Hide' : 'Show'} Advanced Options
+            </button>
+          </div>
+
+          {/* Advanced Options */}
+          {showAdvancedOptions && (
+            <div className="grid grid-cols-3 gap-4 p-3 bg-gray-50 rounded">
+              {Object.entries(options).map(([key, value]) => (
+                <label key={key} className="flex items-center space-x-2">
+                  <input
+                    type="checkbox"
+                    checked={value}
+                    onChange={(e) => setOptions(prev => ({ ...prev, [key]: e.target.checked }))}
+                    className="rounded"
+                  />
+                  <span className="text-sm text-gray-700 capitalize">
+                    {key.replace('_', ' ')}
+                  </span>
+                </label>
+              ))}
+            </div>
+          )}
+
           {/* Media Input */}
           <div className="flex space-x-2">
             <input
@@ -588,7 +747,7 @@ export default function ChatUI() {
               value={mediaUrl}
               onChange={(e) => setMediaUrl(e.target.value)}
               placeholder="Media URL (image/video)"
-              className="flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              className="flex-1 px-3 py-2 border border-gray-300 text-black rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
             />
             
             <button
@@ -646,7 +805,7 @@ export default function ChatUI() {
                   ? "Describe the media or leave blank for automatic analysis..."
                   : "Enter claim or describe media for full investigation..."
               }
-              className="flex-1 px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              className="flex-1 text-black px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
               disabled={isLoading}
             />
             

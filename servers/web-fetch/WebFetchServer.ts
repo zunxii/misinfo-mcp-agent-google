@@ -1,8 +1,8 @@
-import { BaseServer } from '../../base/BaseServer.js';
+import { BaseServer } from '../../base/BaseServer';
 import { Tool, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
-import { WebFetchResult, SearchResult } from '../../types/web-fetch.types.js';
-import { WebScraperService } from '../../services/web-scraper.service.js';
-import { CryptoUtils } from '../../utils/crypto.utils.js';
+import { WebFetchResult, SearchResult } from '../../types/web-fetch.types';
+import { WebScraperService } from '../../services/web-scraper.service';
+import { CryptoUtils } from '../../utils/crypto.utils';
 
 export class WebFetchServer extends BaseServer {
   protected serverName = "web-fetch-mcp";
@@ -12,7 +12,7 @@ export class WebFetchServer extends BaseServer {
   private scraperService: WebScraperService;
 
   constructor() {
-    super();
+    super("web-fetch-mcp", "1.0.0", "MCP server for web content fetching and search");
     const userAgent = process.env.USER_AGENT || 'FactCheck-Bot/1.0';
     this.scraperService = new WebScraperService(userAgent);
   }

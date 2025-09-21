@@ -71,9 +71,8 @@ export class McpClient {
 
       // Create transport with correct parameters
       this.transport = new StdioClientTransport({
-        // Use the child process stdio streams
-        inputStream: this.serverProcess.stdout,
-        outputStream: this.serverProcess.stdin,
+        stdin: this.serverProcess.stdin,
+        stdout: this.serverProcess.stdout,
       });
 
       const timeoutPromise = new Promise<never>((_, reject) => {
@@ -102,7 +101,7 @@ export class McpClient {
     try {
       const response = await this.client.request(
         { method: "tools/list" },
-        {} // Empty params object instead of schema
+        {}
       );
 
       this.availableTools = (response as any).tools || [];
@@ -137,7 +136,7 @@ export class McpClient {
             arguments: arguments_,
           },
         },
-        {} // Empty params object
+        {}
       );
 
       const typedResponse = response as any;
@@ -146,19 +145,27 @@ export class McpClient {
         throw new Error(`Tool call error: ${typedResponse.content?.[0]?.text || 'Unknown error'}`);
       }
 
-      let result: any;
-      if (typedResponse.content?.length === 1 && typedResponse.content[0].type === 'text') {
-        try {
-          result = JSON.parse(typedResponse.content[0].text);
-        } catch {
-          result = typedResponse.content[0].text;
+      // Handle different response formats
+      if (typedResponse.content) {
+        if (Array.isArray(typedResponse.content)) {
+          if (typedResponse.content.length === 1) {
+            const content = typedResponse.content[0];
+            if (content.type === 'text') {
+              try {
+                return JSON.parse(content.text);
+              } catch {
+                return content.text;
+              }
+            }
+            return content;
+          }
+          return typedResponse.content;
         }
-      } else {
-        result = typedResponse.content;
+        return typedResponse.content;
       }
 
       console.log(`Tool ${toolName} completed successfully`);
-      return result;
+      return typedResponse;
 
     } catch (error) {
       console.error(`Tool call failed for ${toolName} on ${this.serverName}:`, error);
@@ -253,5 +260,174 @@ export class McpClient {
 
   get tools(): Tool[] {
     return [...this.availableTools];
+  }
+}
+
+export class McpClientManager {
+  private clients: Map<string, McpClient> = new Map();
+  private configs: Map<string, McpServerConfig> = new Map();
+
+  constructor(private defaultTimeout: number = 30000) {}
+
+  addServer(config: McpServerConfig): void {
+    this.configs.set(config.name, config);
+    console.log(`Added MCP server config: ${config.name}`);
+  }
+
+  async connectAll(): Promise<void> {
+    const connectionPromises = Array.from(this.configs.entries()).map(
+      async ([name, config]) => {
+        try {
+          const client = new McpClient(name, config.timeout || this.defaultTimeout);
+          await client.connect(config.command, config.args, config.env);
+          this.clients.set(name, client);
+          console.log(`✓ Connected to ${name}`);
+        } catch (error) {
+          console.error(`✗ Failed to connect to ${name}:`, error);
+        }
+      }
+    );
+
+    await Promise.allSettled(connectionPromises);
+    
+    const connectedCount = this.clients.size;
+    const totalCount = this.configs.size;
+    console.log(`Connected to ${connectedCount}/${totalCount} MCP servers`);
+  }
+
+  async connectServer(name: string): Promise<void> {
+    const config = this.configs.get(name);
+    if (!config) {
+      throw new Error(`No configuration found for server: ${name}`);
+    }
+
+    const existingClient = this.clients.get(name);
+    if (existingClient) {
+      await existingClient.close();
+    }
+
+    const client = new McpClient(name, config.timeout || this.defaultTimeout);
+    await client.connect(config.command, config.args, config.env);
+    this.clients.set(name, client);
+  }
+
+  getClient(name: string): McpClient | undefined {
+    return this.clients.get(name);
+  }
+
+  async callTool(serverName: string, toolName: string, args: any = {}): Promise<any> {
+    const client = this.clients.get(serverName);
+    if (!client) {
+      throw new Error(`MCP client ${serverName} not found or not connected`);
+    }
+
+    return await client.callTool(toolName, args);
+  }
+
+  async healthCheck(): Promise<{ [serverName: string]: boolean }> {
+    const results: { [serverName: string]: boolean } = {};
+    
+    const healthPromises = Array.from(this.clients.entries()).map(
+      async ([name, client]) => {
+        const isHealthy = await client.ping();
+        results[name] = isHealthy;
+        return { name, isHealthy };
+      }
+    );
+
+    await Promise.allSettled(healthPromises);
+    return results;
+  }
+
+  async reconnectServer(name: string): Promise<void> {
+    const config = this.configs.get(name);
+    const client = this.clients.get(name);
+    
+    if (!config) {
+      throw new Error(`No configuration found for server: ${name}`);
+    }
+
+    if (client) {
+      await client.reconnect(config.command, config.args, config.env);
+    } else {
+      await this.connectServer(name);
+    }
+  }
+
+  listConnectedServers(): string[] {
+    return Array.from(this.clients.keys()).filter(name => 
+      this.clients.get(name)?.connected
+    );
+  }
+
+  listAllServers(): string[] {
+    return Array.from(this.configs.keys());
+  }
+
+  async getAllTools(): Promise<{ [serverName: string]: Tool[] }> {
+    const allTools: { [serverName: string]: Tool[] } = {};
+    
+    for (const [name, client] of this.clients) {
+      if (client.connected) {
+        try {
+          allTools[name] = await client.listTools();
+        } catch (error) {
+          console.warn(`Failed to get tools from ${name}:`, error);
+          allTools[name] = [];
+        }
+      }
+    }
+    
+    return allTools;
+  }
+
+  async closeAll(): Promise<void> {
+    console.log('Closing all MCP clients...');
+    
+    const closePromises = Array.from(this.clients.values()).map(client => 
+      client.close().catch(error => 
+        console.error(`Error closing client ${client.name}:`, error)
+      )
+    );
+    
+    await Promise.allSettled(closePromises);
+    this.clients.clear();
+    
+    console.log('All MCP clients closed');
+  }
+
+  static createStandardConfig(): McpClientManager {
+    const manager = new McpClientManager();
+    
+    manager.addServer({
+      name: 'factcheck',
+      command: 'node',
+      args: ['dist/servers/factcheck/server.ts'],
+      env: {
+        GOOGLE_FACTCHECK_API_KEY: process.env.GOOGLE_FACTCHECK_API_KEY || '',
+        SIGNING_SECRET: process.env.SIGNING_SECRET || 'dev-secret',
+      },
+    });
+    
+    manager.addServer({
+      name: 'video-forensics',
+      command: 'node', 
+      args: ['dist/servers/video-forensics/server.ts'],
+      env: {
+        TEMP_DIR: process.env.TEMP_DIR || '/tmp/video-forensics',
+        GOOGLE_VISION_API_KEY: process.env.GOOGLE_VISION_API_KEY || '',
+      },
+    });
+    
+    manager.addServer({
+      name: 'web-fetch',
+      command: 'node',
+      args: ['dist/servers/web-fetch/server.ts'],
+      env: {
+        USER_AGENT: 'FactCheck-Bot/1.0',
+      },
+    });
+
+    return manager;
   }
 }

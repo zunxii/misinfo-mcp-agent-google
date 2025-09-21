@@ -5,21 +5,22 @@ import {
   ErrorCode,
   ListToolsRequestSchema,
   McpError,
-  Tool,
+  Tool, 
 } from "@modelcontextprotocol/sdk/types.js";
 
 export abstract class BaseServer {
   protected server: Server;
-  protected abstract serverName: string;
-  protected abstract serverVersion: string;
-  protected abstract serverDescription: string;
 
-  constructor() {
+  constructor(
+    protected readonly serverName: string,
+    protected readonly serverVersion: string,
+    protected readonly serverDescription: string
+  ) {
     this.server = new Server(
       {
-        name: this.serverName,
-        version: this.serverVersion,
-        description: this.serverDescription,
+        name: serverName,
+        version: serverVersion,
+        description: serverDescription,
       },
       {
         capabilities: {
